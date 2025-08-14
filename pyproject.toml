@@ -1,0 +1,25 @@
+[project]
+name = "mikrotik-addresslist"
+dynamic = ["version"]
+description = "Default template for PDM package" #ToDo: Update this description
+authors = [
+    {name = "Julius Koenig", email = "info@bastelquartier.de"},
+]
+dependencies = []
+requires-python = ">=3.13" #ToDo: Update this Python version requirement
+readme = "README.md"
+license = { file = "LICENSE" }
+
+[build-system]
+requires = ["pdm-backend"]
+build-backend = "pdm.backend"
+
+[tool.pdm]
+distribution = true
+
+[tool.pdm.version]
+source = "file"
+path = "src/mikrotik_addresslist/__init__.py"
+
+[tool.pdm.scripts]
+push-tags = { shell = "git push origin --tags" }
