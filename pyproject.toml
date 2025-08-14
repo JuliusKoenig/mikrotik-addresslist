@@ -5,10 +5,13 @@ description = "Default template for PDM package" #ToDo: Update this description
 authors = [
     {name = "Julius Koenig", email = "info@bastelquartier.de"},
 ]
-dependencies = []
+dependencies = ["wiederverwendbar[fastapi,typer,uvicorn]>=0.9.2", "requests>=2.32.4"]
 requires-python = ">=3.13" #ToDo: Update this Python version requirement
 readme = "README.md"
 license = { file = "LICENSE" }
+
+[project.scripts]
+mikrotik-addresslist = "mikrotik_addresslist.cli:cli_app"
 
 [build-system]
 requires = ["pdm-backend"]
