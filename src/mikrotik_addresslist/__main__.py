@@ -11,6 +11,7 @@ from enum import Enum
 
 import typer
 from fastapi import HTTPException
+from fastapi.responses import FileResponse
 from pydantic import (BaseModel,
                       Field,
                       FileUrl,
@@ -40,7 +41,13 @@ from mikrotik_addresslist import (__name__ as __module_name__,
                                   __env_prefix__)
 
 if f"{__env_prefix__}LOG_LEVEL" not in os.environ:
-    os.environ[f"{__env_prefix__}LOG_LEVEL"] = "DEBUG" # ToDo #"INFO"
+    os.environ[f"{__env_prefix__}LOG_LEVEL"] = "DEBUG"  # ToDo #"INFO"
+os.environ[f"{__env_prefix__}SCRIPTS"] = """{
+    "test": {
+        "source": "file:///example_blocklist.txt",
+        "name": "hg_test"
+    }
+}""" # ToDo: remove this line after testing
 
 
 class Settings(BaseSettings, LoggerSettings, TyperSettings, FastAPISettings, UvicornServerSettings):
@@ -52,11 +59,14 @@ class Settings(BaseSettings, LoggerSettings, TyperSettings, FastAPISettings, Uvi
     datetime_format: str = Field(default="%d.%m.%Y - %H:%M:%S",
                                  title="Date and Time Format",
                                  description="Format for date and time in the generated script.")
+    file_encoding: str = Field(default="utf-8",
+                               title="File Encoding",
+                               description="Encoding used for reading and writing files.")
 
     class Script(BaseModel):
-        source: FileUrl | HttpUrl | Path = Field(default=...,
-                                                 title="Source",
-                                                 description="Source of the IP addresses, either a local file or a URL.")
+        source: FileUrl | HttpUrl = Field(default=...,
+                                          title="Source",
+                                          description="Source of the IP addresses, either a local file or a URL.")
         name: str = Field(default=...,
                           title="Address List Name",
                           description="Name of the address list to be created in RouterOS.")
@@ -120,6 +130,16 @@ logger = LoggerSingleton(name=__module_name__,
                          init=True)
 
 
+def get_script(script_name: str, server: bool) -> NoReturn | Settings.Script:
+    if script_name not in settings.scripts:
+        msg = f"Script configuration with name '{script_name}' not found in settings."
+        if server:
+            raise HTTPException(status_code=404, detail=msg)
+        else:
+            raise FileNotFoundError(msg)
+    return settings.scripts[script_name]
+
+
 def generate_script(script: Settings.Script) -> str:
     # if file is None try to download from url
     if isinstance(script.source, HttpUrl):
@@ -130,9 +150,7 @@ def generate_script(script: Settings.Script) -> str:
                                     local_file=source):
             raise FileNotFoundError(f"Failed to download file from URL: {script.source}")
     elif isinstance(script.source, FileUrl):
-        source = Path(str(script.source)[len(script.source.scheme + "://"):])
-    else:
-        source = Path(script.source)
+        source = Path(script.source.path[1:])
     if not source.is_file():
         raise FileNotFoundError(f"Source file '{source}' does not exist or is not a file.")
 
@@ -236,10 +254,12 @@ cli_app = Typer(settings=settings)
 
 
 @cli_app.command(name="generate-script", help=f"Generate a Mikrotik RouterOS script from local file or URL.")
-def generate_script_command(source: str = typer.Option(...,
+def generate_script_command(script_name: str = typer.Argument(None,
+                                                              help="Name of script configuration in settings."),
+                            source: str = typer.Option(None,
                                                        "-s", "--source",
                                                        help="Source of the IP addresses, either a local file or a URL"),
-                            name: str = typer.Option(...,
+                            name: str = typer.Option(None,
                                                      "-n", "--name",
                                                      help="Name of the address list to be created in RouterOS."),
                             output_file: Path = typer.Option(None,
@@ -275,30 +295,53 @@ def generate_script_command(source: str = typer.Option(...,
                             disabled: bool = typer.Option(False,
                                                           "-D", "--disabled",
                                                           help="Create disabled address list entries.")) -> NoReturn:
-    # noinspection HttpUrlsUsage
-    if source.startswith("file://"):
-        source = FileUrl(source)
-    elif source.startswith("http://") or source.startswith("https://"):
-        source = HttpUrl(source)
+
+    if script_name:
+        try:
+            script = get_script(script_name=script_name, server=False)
+        except FileNotFoundError as e:
+            cli_app.console.print(f"{e}", file=sys.stderr)
+            sys.exit(1)
     else:
-        source = Path(source)
+        if source is None:
+            cli_app.console.print("Source URL must be provided when script name is not specified.", file=sys.stderr)
+            sys.exit(1)
+        # noinspection HttpUrlsUsage
+        if source.startswith("http://") or source.startswith("https://"):
+            source = HttpUrl(source)
+        else:
+            source = FileUrl(Path(source).absolute().as_uri())
+        if name is None:
+            cli_app.console.print("Name must be provided when script name is not specified.", file=sys.stderr)
+            sys.exit(1)
+        script = Settings.Script(source=source,
+                                 name=name,
+                                 header=header,
+                                 comment=comment,
+                                 timeout=timeout,
+                                 log_level=log_level,
+                                 no_catch_errors=no_catch_errors,
+                                 no_ipv4=no_ipv4,
+                                 no_ipv6=no_ipv6,
+                                 dynamic=dynamic,
+                                 disabled=disabled)
+
+
     try:
-        output = generate_script(script=Settings.Script(source=source,
-                                                        name=name,
-                                                        header=header,
-                                                        comment=comment,
-                                                        timeout=timeout,
-                                                        log_level=log_level,
-                                                        no_catch_errors=no_catch_errors,
-                                                        no_ipv4=no_ipv4,
-                                                        no_ipv6=no_ipv6,
-                                                        dynamic=dynamic,
-                                                        disabled=disabled))
+        output = generate_script(script=script)
     except Exception as e:
         cli_app.console.print(f"Error generating script: {e}", file=sys.stderr)
         sys.exit(1)
     if output_file:
-        ...
+        if output_file.is_file():
+            if not force:
+                cli_app.console.print(f"Output file '{output_file}' already exists. Use --force to overwrite.", file=sys.stderr)
+                sys.exit(1)
+        output_file.unlink()
+        output_file.parent.mkdir(parents=True, exist_ok=True)
+        with open(output_file, "w", encoding=settings.file_encoding) as f:
+            f.write(output)
+        cli_app.console.print(f"Script saved to '{output_file}'.")
     else:
         cli_app.console.print(output)
     sys.exit(0)
@@ -308,23 +351,21 @@ def generate_script_command(source: str = typer.Option(...,
 def server_command() -> NoReturn:
     api_app = FastAPI(settings=settings)
 
-    def get_script(script_name: str) -> NoReturn | Settings.Script:
-        if script_name not in settings.scripts:
-            raise HTTPException(status_code=404, detail=f"Script with name '{script_name}' not found.")
-        return settings.scripts[script_name]
-
     @api_app.get("/{script_name}", tags=["Script"])
-    def get_script_content(script_name: str):
-        script = get_script(script_name)
-        print()
+    def get_script_content(script_name: str) -> FileResponse:
+        script = get_script(script_name, server=True)
+        output = generate_script(script)
+        with tempfile.NamedTemporaryFile(mode="w", delete=False, encoding=settings.file_encoding) as f:
+            f.write(output)
+        return FileResponse(f.name, filename=f"{script_name}.rsc", media_type="text/plain")
 
     @api_app.get("/{script_name}/settings", tags=["Script"])
     def get_script_settings(script_name: str) -> Settings.Script:
-        return get_script(script_name)
+        return get_script(script_name, server=True)
 
     @api_app.get("/{script_name}/setup", tags=["Script"])
     def get_script_settings(script_name: str) -> Settings.Script:
-        return get_script(script_name)
+        return get_script(script_name, server=True)
 
     UvicornServer(app=api_app, settings=settings)
     sys.exit(0)
